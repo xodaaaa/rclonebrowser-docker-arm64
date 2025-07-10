@@ -1,74 +1,73 @@
-# RcloneBrowser Dockerfile (multi‑arch)
-FROM jlesage/baseimage‑gui:alpine‑3.12‑glibc
+#
+# RcloneBrowser Dockerfile - Fixed version for ARM64
+#
 
-# Build arguments
-ARG RCLONE_VERSION=current
-ARG ARCH=amd64
-ARG TARGETPLATFORM
-# Permite usar luego TARGETPLATFORM si es necesario (ej: lógicas condicionales)
-ENV ARCH=${ARCH}
+# Builder stage
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS builder
 
-WORKDIR /tmp
+# Install build dependencies
+RUN apk add --no-cache \
+    build-base \
+    cmake \
+    git \
+    qt5-qtbase-dev \
+    qt5-qtmultimedia-dev \
+    qt5-qttools-dev \
+    wget \
+    unzip \
+    patch
 
-# Instalación de dependencias y rclone precompilado
-RUN apk --no-cache add \
-      ca-certificates \
-      fuse \
-      wget \
-      qt5-qtbase \
-      qt5-qtbase-x11 \
-      libstdc++ \
-      libgcc \
-      dbus \
-      xterm && \
-    cd /tmp && \
-    wget -q http://downloads.rclone.org/rclone-${RCLONE_VERSION}-linux-${ARCH}.zip && \
-    unzip rclone-${RCLONE_VERSION}-linux-${ARCH}.zip && \
-    mv rclone-*-linux-${ARCH}/rclone /usr/bin && \
-    rm -rf /tmp/rclone* && \
-    apk add --no-cache --virtual=build-deps \
-      build-base \
-      cmake \
-      make \
-      gcc \
-      git \
-      qt5-qtbase \
-      qt5-qtmultimedia-dev \
-      qt5-qttools-dev
+# Clone and patch RcloneBrowser
+WORKDIR /build
+RUN git clone https://github.com/kapitainsky/RcloneBrowser.git && \
+    cd RcloneBrowser && \
+    # Patch para las APIs obsoletas
+    sed -i 's/QString::SkipEmptyParts/Qt::SkipEmptyParts/g' src/main_window.cpp && \
+    sed -i 's/player->start(stream, QProcess::ReadOnly);/player->start(stream, QStringList(), QProcess::ReadOnly);/g' src/main_window.cpp
 
-# Compila RcloneBrowser desde el repositorio
-RUN git clone https://github.com/kapitainsky/RcloneBrowser.git /tmp/RcloneBrowser && \
-    mkdir /tmp/RcloneBrowser/build && \
-    cd /tmp/RcloneBrowser/build && \
-    cmake .. && \
-    cmake --build . && \
-    cp build/rclone-browser /usr/bin && \
-    apk del --purge build-deps && \
-    rm -rf /tmp/*
+# Build with disabled warnings-as-errors
+RUN mkdir rclonebrowser-build && cd rclonebrowser-build && \
+    cmake ../RcloneBrowser -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-declarations" && \
+    cmake --build . --parallel $(nproc)
 
-# Configuración de ventana
+# Download rclone binary for ARM64
+RUN wget -q https://downloads.rclone.org/rclone-current-linux-arm64.zip && \
+    unzip rclone-current-linux-arm64.zip && \
+    mv rclone-*-linux-arm64/rclone /usr/local/bin/rclone
+
+# Runtime image
+FROM jlesage/baseimage-gui:alpine-3.20-v4
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    fuse3 \
+    qt5-qtbase \
+    qt5-qtbase-x11 \
+    libstdc++ \
+    libgcc \
+    dbus \
+    xterm
+
+# Copy built artifacts
+COPY --from=builder /build/rclonebrowser-build/build/rclone-browser /usr/bin/
+COPY --from=builder /usr/local/bin/rclone /usr/bin/
+
+# Configure GUI
 RUN sed-patch 's/<application type="normal">/<application type="normal" title="Rclone Browser">/' \
-      /etc/xdg/openbox/rc.xml
-
-# Generación de icono de la app
-RUN APP_ICON_URL=https://github.com/rclone/rclone/raw/master/graphics/logo/logo_symbol/logo_symbol_color_512px.png && \
+    /etc/xdg/openbox/rc.xml && \
+    APP_ICON_URL=https://github.com/rclone/rclone/raw/master/graphics/logo/logo_symbol/logo_symbol_color_512px.png && \
     install_app_icon.sh "$APP_ICON_URL"
 
-# Archivos adicionales
+# Add files
 COPY rootfs/ /
 COPY VERSION /
 
-# Variables de entorno
+# Environment
 ENV APP_NAME="RcloneBrowser" \
     S6_KILL_GRACETIME=8000
 
-# Directorios montables
-VOLUME ["/config"]
-VOLUME ["/media"]
+VOLUME ["/config", "/media"]
 
-# Metadata
-LABEL org.label-schema.name="rclonebrowser" \
-      org.label-schema.description="Docker container for RcloneBrowser" \
-      org.label-schema.version="unknown" \
-      org.label-schema.vcs-url="https://github.com/romancin/rclonebrowser-docker" \
-      org.label-schema.schema-version="1.0"
+LABEL org.label-schema.name="rclonebrowser-arm64" \
+      org.label-schema.description="RcloneBrowser for ARM64"
